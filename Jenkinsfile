@@ -1,4 +1,5 @@
 pipeline {
+
     agent any
 
     options {
@@ -9,222 +10,297 @@ pipeline {
     }
 
     parameters {
+
         string(
             name: 'DEPLOY_DIR',
             defaultValue: '/var/www/timesheet',
-            description: 'Absolute path to the app directory on this server'
+            description: 'Deployment directory'
         )
+
         string(
             name: 'APP_USER',
             defaultValue: 'testing',
-            description: 'OS user that owns the app directory (e.g. ubuntu, testing)'
+            description: 'Linux application user'
         )
+
         string(
             name: 'BRANCH',
             defaultValue: 'main',
-            description: 'Git branch to build and deploy'
+            description: 'Git branch'
         )
+
         booleanParam(
             name: 'SKIP_TESTS',
             defaultValue: false,
-            description: 'Skip the test stage (use with caution)'
+            description: 'Skip tests'
         )
     }
 
     environment {
+
         SERVICE_NAME = 'timesheet'
         NGINX_SITE   = 'timesheet'
+        APP_PORT     = '5000'
     }
 
     stages {
 
-        // ── 1. CHECKOUT ───────────────────────────────────────
+        // =====================================================
+        // CHECKOUT
+        // =====================================================
+
         stage('Checkout') {
+
             steps {
-                echo "==> Checking out branch: ${params.BRANCH}"
+
+                echo "Checking out branch: ${params.BRANCH}"
+
                 checkout([
                     $class: 'GitSCM',
                     branches: [[name: "*/${params.BRANCH}"]],
                     userRemoteConfigs: scm.userRemoteConfigs
                 ])
+
                 sh 'git log -1 --oneline'
             }
         }
 
-        // ── 2. LINT ───────────────────────────────────────────
-        stage('Lint') {
-            steps {
-                echo "==> Running flake8 static analysis"
-                script {
-                    sh '''
-                        python3 -m venv .lint-venv
-                        . .lint-venv/bin/activate
-                        pip install --quiet flake8
-                        flake8 app.py chaos_endpoints.py chaos_bot.py \
-                            --max-line-length=120 \
-                            --ignore=W503 \
-                            --exit-zero \
-                            --statistics \
-                            --output-file=flake8-report.txt || true
-                        cat flake8-report.txt
-                        deactivate
-                    '''
-                    def violations = sh(
-                        script: "grep -c '.' flake8-report.txt || true",
-                        returnStdout: true
-                    ).trim().toInteger()
-                    if (violations > 0) {
-                        echo "WARNING: ${violations} lint violation(s) found. Build marked UNSTABLE."
-                        unstable("Lint violations detected (${violations} issues)")
-                    } else {
-                        echo "Lint PASSED — no violations found."
-                    }
-                }
-            }
-        }
+        // =====================================================
+        // LINT
+        // =====================================================
 
-        // ── 3. TEST ───────────────────────────────────────────
-        stage('Test') {
-            when {
-                expression { !params.SKIP_TESTS }
-            }
+        stage('Lint') {
+
             steps {
-                echo "==> Installing dependencies and running tests"
+
+                echo "Running flake8 lint checks"
+
                 sh '''
-                    python3 -m venv .test-venv
-                    . .test-venv/bin/activate
-                    pip install --quiet -r requirements.txt pytest
-                    pytest --tb=short -q || true
+                    python3 -m venv .lint-venv
+
+                    . .lint-venv/bin/activate
+
+                    pip install --quiet flake8
+
+                    flake8 app.py chaos_endpoints.py chaos_bot.py \
+                        --max-line-length=120 \
+                        --ignore=W503 \
+                        --statistics \
+                        --exit-zero
+
                     deactivate
                 '''
             }
-            post {
-                always {
-                    junit allowEmptyResults: true, testResults: '**/test-results/*.xml'
-                }
-            }
         }
 
-        // ── 4. PACKAGE ────────────────────────────────────────
-        stage('Package') {
+        // =====================================================
+        // TEST
+        // =====================================================
+
+        stage('Test') {
+
+            when {
+                expression { !params.SKIP_TESTS }
+            }
+
             steps {
-                echo "==> Creating deployment archive"
+
+                echo "Running tests"
+
                 sh '''
-                    # Jenkins sh runs with implicit set -e.
-                    # tar exits 1 when a file changes while being read (harmless).
-                    # Temporarily disable set -e so we can inspect the exit code ourselves.
-                    set +e
-                    tar --exclude='.git' \
-                        --exclude='.lint-venv' \
-                        --exclude='.test-venv' \
-                        --exclude='venv' \
-                        --exclude='__pycache__' \
-                        --exclude='*.pyc' \
-                        --exclude='logs' \
-                        --exclude='*.sock' \
-                        --exclude='database.db' \
-                        --exclude='*.backup' \
-                        --exclude='timesheet-app.tar.gz' \
-                        --warning=no-file-changed \
-                        -czf timesheet-app.tar.gz .
-                    TAR_EXIT=$?
-                    set -e
-                    if [ $TAR_EXIT -gt 1 ]; then
-                        echo "ERROR: tar failed with exit code $TAR_EXIT"
-                        exit $TAR_EXIT
-                    fi
-                    echo "Archive size: $(du -sh timesheet-app.tar.gz | cut -f1)"
+                    python3 -m venv .test-venv
+
+                    . .test-venv/bin/activate
+
+                    pip install --quiet -r requirements.txt pytest
+
+                    pytest -v || true
+
+                    deactivate
                 '''
             }
         }
 
-        // ── 5. DEPLOY (local — Jenkins IS the server) ─────────
-        stage('Deploy') {
+        // =====================================================
+        // PACKAGE
+        // =====================================================
+
+        stage('Package') {
+
             steps {
-                echo "==> Deploying locally to ${params.DEPLOY_DIR}"
+
+                echo "Creating deployment package"
+
+                sh '''
+                    rm -f timesheet-app.tar.gz
+
+                    tar \
+                        --exclude=.git \
+                        --exclude=.lint-venv \
+                        --exclude=.test-venv \
+                        --exclude=venv \
+                        --exclude=__pycache__ \
+                        --exclude=*.pyc \
+                        --exclude=logs \
+                        --exclude=database.db \
+                        --exclude=timesheet-app.tar.gz \
+                        -czf timesheet-app.tar.gz .
+
+                    echo "Package Created:"
+                    du -sh timesheet-app.tar.gz
+                '''
+            }
+        }
+
+        // =====================================================
+        // DEPLOY
+        // =====================================================
+
+        stage('Deploy') {
+
+            steps {
+
+                echo "Deploying application"
+
                 sh """
                     #!/bin/bash
-                    set -eu pipefail
-                    echo "Pre-Requisites:" 
+
+                    set -eu
 
                     DEPLOY_DIR="${params.DEPLOY_DIR}"
                     APP_USER="${params.APP_USER}"
-                    SERVICE="${env.SERVICE_NAME}"
-                    NGINX_SITE="${env.NGINX_SITE}"
 
-                    echo "[1/6] Stopping Gunicorn service..."
-                    sudo systemctl stop \$SERVICE || true
+                    echo "[1/7] Creating directories"
 
-                    echo "[2/6] Syncing application files..."
+                    sudo mkdir -p \$DEPLOY_DIR
                     sudo mkdir -p \$DEPLOY_DIR/persistent_data
 
-                    # Extract archive — .env and persistent_data are never overwritten
+                    echo "[2/7] Stopping application"
+
+                    sudo systemctl stop ${env.SERVICE_NAME} || true
+
+                    echo "[3/7] Extracting package"
+
                     sudo tar -xzf timesheet-app.tar.gz \
-                        --directory \$DEPLOY_DIR \
+                        -C \$DEPLOY_DIR \
                         --exclude='persistent_data' \
                         --exclude='.env'
 
-                    echo "[3/6] Setting up Python virtual environment..."
-                    sudo python3 -m venv \$DEPLOY_DIR/venv
-                    sudo \$DEPLOY_DIR/venv/bin/pip install --quiet --upgrade pip
-                    sudo \$DEPLOY_DIR/venv/bin/pip install --quiet -r \$DEPLOY_DIR/requirements.txt
+                    echo "[4/7] Installing dependencies"
 
-                    echo "[4/6] Fixing permissions..."
+                    if [ ! -d "\$DEPLOY_DIR/venv" ]; then
+                        sudo python3 -m venv \$DEPLOY_DIR/venv
+                    fi
+
+                    sudo \$DEPLOY_DIR/venv/bin/pip install --quiet --upgrade pip
+
+                    sudo \$DEPLOY_DIR/venv/bin/pip install \
+                        --quiet \
+                        -r \$DEPLOY_DIR/requirements.txt
+
+                    echo "[5/7] Setting permissions"
+
                     sudo chown -R \$APP_USER:www-data \$DEPLOY_DIR
+
                     sudo chmod -R 750 \$DEPLOY_DIR
+
                     sudo chmod -R 770 \$DEPLOY_DIR/persistent_data
 
-                    echo "[5/6] Reloading systemd service..."
-                    sudo systemctl daemon-reload
-                    sudo systemctl enable \$SERVICE
-                    sudo systemctl start \$SERVICE
+                    echo "[6/7] Restarting service"
 
-                    echo "[6/6] Reloading Nginx..."
-                    sudo cp \$DEPLOY_DIR/DEPLOY_NGINX.conf /etc/nginx/sites-available/\$NGINX_SITE
-                    sudo ln -sf /etc/nginx/sites-available/\$NGINX_SITE \
-                                /etc/nginx/sites-enabled/\$NGINX_SITE
+                    sudo systemctl daemon-reload
+
+                    sudo systemctl enable ${env.SERVICE_NAME}
+
+                    sudo systemctl restart ${env.SERVICE_NAME}
+
+                    sleep 5
+
+                    sudo systemctl status ${env.SERVICE_NAME} --no-pager
+
+                    echo "[7/7] Reloading Nginx"
+
+                    sudo cp \$DEPLOY_DIR/DEPLOY_NGINX.conf \
+                        /etc/nginx/sites-available/${env.NGINX_SITE}
+
+                    sudo ln -sf \
+                        /etc/nginx/sites-available/${env.NGINX_SITE} \
+                        /etc/nginx/sites-enabled/${env.NGINX_SITE}
+
                     sudo nginx -t
+
                     sudo systemctl reload nginx
 
-                    echo "==> Deployment complete!"
+                    echo "Deployment completed successfully"
                 """
             }
         }
 
-        // ── 6. HEALTH CHECK (local curl) ──────────────────────
+        // =====================================================
+        // HEALTH CHECK
+        // =====================================================
+
         stage('Health Check') {
+
             steps {
-                echo "==> Verifying the app is responding on localhost..."
-                sh '''
+
+                echo "Running health check"
+
+                sh """
                     #!/bin/bash
-                    set -euo pipefail
-                    for i in $(seq 1 6); do
-                        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/)
-                        echo "Attempt $i — HTTP $HTTP_STATUS"
-                        if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "302" ]; then
-                            echo "Health check PASSED"
+
+                    set -eu
+
+                    for i in {1..6}; do
+
+                        STATUS=\$(curl -s -o /dev/null \
+                            -w "%{http_code}" \
+                            http://localhost/health || true)
+
+                        echo "Attempt \$i -> HTTP \$STATUS"
+
+                        if [ "\$STATUS" == "200" ]; then
+
+                            echo "Application is healthy"
+
                             exit 0
                         fi
+
                         sleep 5
                     done
-                    echo "Health check FAILED after 30 seconds"
-                    sudo systemctl status timesheet --no-pager || true
+
+                    echo "Health check failed"
+
+                    sudo systemctl status ${env.SERVICE_NAME} --no-pager || true
+
+                    sudo journalctl -u ${env.SERVICE_NAME} -n 50 --no-pager || true
+
                     exit 1
-                '''
+                """
             }
         }
+    }
 
-    } // end stages
+    // =========================================================
+    // POST ACTIONS
+    // =========================================================
 
     post {
+
         success {
-            echo "Pipeline SUCCESS — Timesheet app is live at http://localhost/"
+
+            echo "Timesheet deployment completed successfully"
         }
+
         failure {
-            echo "Pipeline FAILED — check the logs above for details"
+
+            echo "Deployment failed"
         }
+
         always {
+
             sh 'rm -f timesheet-app.tar.gz || true'
+
             cleanWs()
         }
     }
