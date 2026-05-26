@@ -132,21 +132,37 @@ pipeline {
                 echo "Creating deployment package"
 
                 sh '''
+                    set +e
+
                     rm -f timesheet-app.tar.gz
 
                     tar \
                         --exclude=.git \
                         --exclude=.lint-venv \
                         --exclude=.test-venv \
+                        --exclude=.pytest_cache \
+                        --exclude=.coverage \
+                        --exclude=htmlcov \
                         --exclude=venv \
                         --exclude=__pycache__ \
                         --exclude=*.pyc \
                         --exclude=logs \
                         --exclude=database.db \
                         --exclude=timesheet-app.tar.gz \
+                        --warning=no-file-changed \
                         -czf timesheet-app.tar.gz .
 
-                    echo "Package Created:"
+                    TAR_EXIT=$?
+
+                    set -e
+
+                    if [ $TAR_EXIT -gt 1 ]; then
+                        echo "Tar packaging failed"
+                        exit $TAR_EXIT
+                    fi
+
+                    echo "Package Created Successfully"
+
                     du -sh timesheet-app.tar.gz
                 '''
             }
@@ -163,8 +179,6 @@ pipeline {
                 echo "Deploying application"
 
                 sh """
-                    #!/bin/bash
-
                     set -eu
 
                     DEPLOY_DIR="${params.DEPLOY_DIR}"
@@ -192,7 +206,9 @@ pipeline {
                         sudo python3 -m venv \$DEPLOY_DIR/venv
                     fi
 
-                    sudo \$DEPLOY_DIR/venv/bin/pip install --quiet --upgrade pip
+                    sudo \$DEPLOY_DIR/venv/bin/pip install \
+                        --quiet \
+                        --upgrade pip
 
                     sudo \$DEPLOY_DIR/venv/bin/pip install \
                         --quiet \
@@ -246,20 +262,18 @@ pipeline {
 
                 echo "Running health check"
 
-                sh """
-                    #!/bin/bash
+                sh '''
+                    for i in 1 2 3 4 5 6
+                    do
 
-                    set -eu
-
-                    for i in {1..6}; do
-
-                        STATUS=\$(curl -s -o /dev/null \
+                        STATUS=$(curl -s \
+                            -o /dev/null \
                             -w "%{http_code}" \
-                            http://localhost/ || true)
+                            http://localhost/health || true)
 
-                        echo "Attempt \$i -> HTTP \$STATUS"
+                        echo "Attempt $i -> HTTP $STATUS"
 
-                        if [ "\$STATUS" == "200" ]; then
+                        if [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ]; then
 
                             echo "Application is healthy"
 
@@ -267,16 +281,17 @@ pipeline {
                         fi
 
                         sleep 5
+
                     done
 
                     echo "Health check failed"
 
-                    sudo systemctl status ${env.SERVICE_NAME} --no-pager || true
+                    sudo systemctl status timesheet --no-pager || true
 
-                    sudo journalctl -u ${env.SERVICE_NAME} -n 50 --no-pager || true
+                    sudo journalctl -u timesheet -n 50 --no-pager || true
 
                     exit 1
-                """
+                '''
             }
         }
     }
