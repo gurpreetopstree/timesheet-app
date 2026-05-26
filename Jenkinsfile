@@ -269,7 +269,7 @@ pipeline {
                         STATUS=$(curl -s \
                             -o /dev/null \
                             -w "%{http_code}" \
-                            http://localhost/health || true)
+                            http://localhost || true)
 
                         echo "Attempt $i -> HTTP $STATUS"
 
