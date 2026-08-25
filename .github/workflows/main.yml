@@ -1,0 +1,195 @@
+name: Flask CI/CD
+
+on:
+  workflow_dispatch:
+  # push:
+  #   branches:
+  #     - main
+  #     - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+env:
+  DOCKERHUB_REPO: flask-app
+  DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
+  PYTHON_VERSION: "3.12"
+  SONAR_PROJECT_KEY: flask-app
+  TRIVY_CACHE_DIR: .trivy-cache
+
+jobs:
+  # --------------------------------------------------
+  # 1. Tests, SAST & Source Vulnerability Quality Gate
+  # --------------------------------------------------
+  test-and-scan:
+    name: Tests & SAST Quality Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run unit tests with coverage
+        run: |
+          pytest --cov=. --cov-report=xml:coverage.xml
+
+      - name: Publish Test Coverage Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-coverage-report
+          path: coverage.xml
+          retention-days: 14
+
+      - name: SonarQube Code Analysis
+        uses: SonarSource/sonarqube-scan-action@v4
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }}
+            -Dsonar.python.coverage.reportPaths=coverage.xml
+
+      - name: Quality Gate - SonarQube Server Check
+        uses: SonarSource/sonarqube-quality-gate-action@v1.1.0
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: Cache Trivy Vulnerability DB
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TRIVY_CACHE_DIR }}
+          key: trivy-db-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Generate Trivy FS Report (SARIF)
+        uses: aquasecurity/trivy-action@v0.28.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-fs-report.sarif'
+          cache-dir: ${{ env.TRIVY_CACHE_DIR }}
+
+      - name: Publish Trivy Filesystem Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-sarif
+          path: trivy-fs-report.sarif
+          retention-days: 14
+
+      # Quality Gate: Stops pipeline if HIGH or CRITICAL vulnerabilities are found
+      - name: Quality Gate - Filesystem Vulnerabilities
+        uses: aquasecurity/trivy-action@v0.28.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'HIGH,CRITICAL'
+          cache-dir: ${{ env.TRIVY_CACHE_DIR }}
+
+  # --------------------------------------------------
+  # 2. Build, Container Quality Gate & Push
+  # --------------------------------------------------
+  build-scan-push:
+    name: Container Build & Image Gate
+    runs-on: ubuntu-latest
+    needs: test-and-scan
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker Metadata (Tags & Labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.DOCKERHUB_REPO }}
+          tags: |
+            type=sha,format=short,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build Local Image for Scan
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Cache Trivy Image DB
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TRIVY_CACHE_DIR }}
+          key: trivy-image-db-${{ runner.os }}
+          restore-keys: |
+            trivy-image-db-${{ runner.os }}-
+
+      - name: Generate Trivy Image Report (SARIF)
+        uses: aquasecurity/trivy-action@v0.28.0
+        with:
+          image-ref: ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.DOCKERHUB_REPO }}:${{ steps.meta.outputs.version }}
+          format: 'sarif'
+          output: 'trivy-image-report.sarif'
+          cache-dir: ${{ env.TRIVY_CACHE_DIR }}
+
+      - name: Publish Trivy Image Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-sarif
+          path: trivy-image-report.sarif
+          retention-days: 14
+
+      # Quality Gate: Fails container stage if image has HIGH or CRITICAL issues
+      - name: Quality Gate - Container Image Vulnerabilities
+        uses: aquasecurity/trivy-action@v0.28.0
+        with:
+          image-ref: ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.DOCKERHUB_REPO }}:${{ steps.meta.outputs.version }}
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'HIGH,CRITICAL'
+          cache-dir: ${{ env.TRIVY_CACHE_DIR }}
+
+      - name: Log in to Docker Hub
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push Validated Image to Docker Hub
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
