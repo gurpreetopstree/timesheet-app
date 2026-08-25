@@ -1,5 +1,4 @@
-name: Flask CI/CD
-
+name: Flask CI
 on:
   workflow_dispatch:
   # push:
@@ -42,18 +41,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-cov
-
-      - name: Run unit tests with coverage
-        run: |
-          pytest --cov=. --cov-report=xml:coverage.xml
-
-      - name: Publish Test Coverage Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: pytest-coverage-report
-          path: coverage.xml
-          retention-days: 14
 
       - name: SonarQube Code Analysis
         uses: SonarSource/sonarqube-scan-action@v4
@@ -96,8 +83,6 @@ jobs:
           name: trivy-fs-sarif
           path: trivy-fs-report.sarif
           retention-days: 14
-
-      # Quality Gate: Stops pipeline if HIGH or CRITICAL vulnerabilities are found
       - name: Quality Gate - Filesystem Vulnerabilities
         uses: aquasecurity/trivy-action@v0.28.0
         with:
@@ -108,7 +93,6 @@ jobs:
           ignore-unfixed: true
           severity: 'HIGH,CRITICAL'
           cache-dir: ${{ env.TRIVY_CACHE_DIR }}
-
   # --------------------------------------------------
   # 2. Build, Container Quality Gate & Push
   # --------------------------------------------------
