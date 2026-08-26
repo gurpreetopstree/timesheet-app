@@ -1,4 +1,5 @@
 name: Flask CI
+
 on:
   workflow_dispatch:
   # push:
@@ -41,6 +42,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run unit tests with coverage
+        run: |
+          pytest --cov=. --cov-report=xml:coverage.xml
 
       - name: SonarQube Code Analysis
         uses: SonarSource/sonarqube-scan-action@v4
@@ -59,6 +65,12 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
+      # Install Trivy CLI directly to bypass composite action sub-dependency bugs
+      - name: Set up Trivy
+        uses: aquasecurity/setup-trivy@v0.2.2
+        with:
+          cache: true
+
       - name: Cache Trivy Vulnerability DB
         uses: actions/cache@v4
         with:
@@ -68,13 +80,11 @@ jobs:
             trivy-db-${{ runner.os }}-
 
       - name: Generate Trivy FS Report (SARIF)
-        uses: aquasecurity/trivy-action@v0.28.0
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'sarif'
-          output: 'trivy-fs-report.sarif'
-          cache-dir: ${{ env.TRIVY_CACHE_DIR }}
+        run: |
+          trivy fs . \
+            --cache-dir ${{ env.TRIVY_CACHE_DIR }} \
+            --format sarif \
+            --output trivy-fs-report.sarif
 
       - name: Publish Trivy Filesystem Report
         if: always()
@@ -83,16 +93,17 @@ jobs:
           name: trivy-fs-sarif
           path: trivy-fs-report.sarif
           retention-days: 14
+
+      # Quality Gate: Exits with status 1 on HIGH or CRITICAL findings
       - name: Quality Gate - Filesystem Vulnerabilities
-        uses: aquasecurity/trivy-action@v0.28.0
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'table'
-          exit-code: '1'
-          ignore-unfixed: true
-          severity: 'HIGH,CRITICAL'
-          cache-dir: ${{ env.TRIVY_CACHE_DIR }}
+        run: |
+          trivy fs . \
+            --cache-dir ${{ env.TRIVY_CACHE_DIR }} \
+            --format table \
+            --exit-code 1 \
+            --ignore-unfixed \
+            --severity HIGH,CRITICAL
+
   # --------------------------------------------------
   # 2. Build, Container Quality Gate & Push
   # --------------------------------------------------
@@ -126,6 +137,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Set up Trivy
+        uses: aquasecurity/setup-trivy@v0.2.2
+        with:
+          cache: true
+
       - name: Cache Trivy Image DB
         uses: actions/cache@v4
         with:
@@ -135,12 +151,11 @@ jobs:
             trivy-image-db-${{ runner.os }}-
 
       - name: Generate Trivy Image Report (SARIF)
-        uses: aquasecurity/trivy-action@v0.28.0
-        with:
-          image-ref: ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.DOCKERHUB_REPO }}:${{ steps.meta.outputs.version }}
-          format: 'sarif'
-          output: 'trivy-image-report.sarif'
-          cache-dir: ${{ env.TRIVY_CACHE_DIR }}
+        run: |
+          trivy image ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.DOCKERHUB_REPO }}:${{ steps.meta.outputs.version }} \
+            --cache-dir ${{ env.TRIVY_CACHE_DIR }} \
+            --format sarif \
+            --output trivy-image-report.sarif
 
       - name: Publish Trivy Image Report
         if: always()
@@ -152,14 +167,13 @@ jobs:
 
       # Quality Gate: Fails container stage if image has HIGH or CRITICAL issues
       - name: Quality Gate - Container Image Vulnerabilities
-        uses: aquasecurity/trivy-action@v0.28.0
-        with:
-          image-ref: ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.DOCKERHUB_REPO }}:${{ steps.meta.outputs.version }}
-          format: 'table'
-          exit-code: '1'
-          ignore-unfixed: true
-          severity: 'HIGH,CRITICAL'
-          cache-dir: ${{ env.TRIVY_CACHE_DIR }}
+        run: |
+          trivy image ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.DOCKERHUB_REPO }}:${{ steps.meta.outputs.version }} \
+            --cache-dir ${{ env.TRIVY_CACHE_DIR }} \
+            --format table \
+            --exit-code 1 \
+            --ignore-unfixed \
+            --severity HIGH,CRITICAL
 
       - name: Log in to Docker Hub
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
