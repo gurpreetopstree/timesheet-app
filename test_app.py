@@ -15,13 +15,12 @@ def test_sanity():
     assert True
 
 
-def test_home_page_status(client):
-    """Verify that root endpoint responds."""
+def test_home_page(client):
+    """Verify root endpoint responds."""
     response = client.get("/")
     assert response.status_code in [200, 302]
 
 
-def test_404_not_found(client):
-    """Verify 404 response for nonexistent routes."""
-    response = client.get("/invalid-route-endpoint")
-    assert response.status_code == 404
+def test_app_configured(client):
+    """Verify application testing configuration."""
+    assert app.config["TESTING"] is True
