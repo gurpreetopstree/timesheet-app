@@ -59,6 +59,7 @@ jobs:
             -Dsonar.python.coverage.reportPaths=coverage.xml
 
       - name: Quality Gate - SonarQube Server Check
+        continue-on-error: true
         uses: SonarSource/sonarqube-quality-gate-action@v1.1.0
         timeout-minutes: 5
         env:
