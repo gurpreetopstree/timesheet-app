@@ -1,4 +1,4 @@
-name: Flask CI
+name: Flask CI/CD
 
 on:
   workflow_dispatch:
@@ -11,6 +11,15 @@ on:
       - main
       - develop
 
+# Cancel redundant in-progress builds on new commits
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Principle of least privilege
+permissions:
+  contents: read
+
 env:
   DOCKERHUB_REPO: timesheet-python
   DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -20,34 +29,43 @@ env:
 
 jobs:
   # --------------------------------------------------
-  # 1. Tests, SAST & Source Vulnerability Quality Gate
+  # 1. Secret Scanning, Linters & Unit Tests (SAST)
   # --------------------------------------------------
-  test-and-scan:
-    name: Tests & SAST Quality Gate
+  code-quality-and-security:
+    name: Secrets, Lint & Unit Tests
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # Required for Gitleaks and SonarQube history analysis
 
+      # 1. Secret Scanning with Gitleaks
+      - name: Run Gitleaks Secret Detection
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 3. Python Setup with Pip Cache
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      - name: Install dependencies
+      - name: Install dependencies & Linters
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest pytest-cov
 
+      # 5. Unit Tests with Coverage
       - name: Run unit tests with coverage
         run: |
           pytest --cov=. --cov-report=xml:coverage.xml
 
+      # 6. SonarQube Static Analysis
       - name: SonarQube Code Analysis
         uses: SonarSource/sonarqube-scan-action@v4
         env:
@@ -66,7 +84,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
-      # Install Trivy CLI directly to bypass composite action sub-dependency bugs
+      # 7. Trivy Dependency / Filesystem Scan
       - name: Set up Trivy
         uses: aquasecurity/setup-trivy@v0.3.1
         with:
@@ -80,39 +98,23 @@ jobs:
           restore-keys: |
             trivy-db-${{ runner.os }}-
 
-      - name: Generate Trivy FS Report (SARIF)
-        run: |
-          trivy fs . \
-            --cache-dir ${{ env.TRIVY_CACHE_DIR }} \
-            --format sarif \
-            --output trivy-fs-report.sarif
-
-      - name: Publish Trivy Filesystem Report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-fs-sarif
-          path: trivy-fs-report.sarif
-          retention-days: 14
-
-      # Quality Gate: Exits with status 1 on HIGH or CRITICAL findings
-      - name: Quality Gate - Filesystem Vulnerabilities
+      - name: Quality Gate - Filesystem & Dependencies
         continue-on-error: true
         run: |
           trivy fs . \
             --cache-dir ${{ env.TRIVY_CACHE_DIR }} \
             --format table \
-            # --exit-code 1 \
+            --exit-code 1 \
             --ignore-unfixed \
             --severity HIGH,CRITICAL
 
   # --------------------------------------------------
-  # 2. Build, Container Quality Gate & Push
+  # 2. Container Build, Image Scan & Registry Push
   # --------------------------------------------------
   build-scan-push:
-    name: Container Build & Image Gate
+    name: Build, Container Scan & Push
     runs-on: ubuntu-latest
-    needs: test-and-scan
+    needs: code-quality-and-security
 
     steps:
       - name: Checkout source code
@@ -130,12 +132,14 @@ jobs:
             type=sha,format=short,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build Local Image for Scan
+      # Single Build: Loaded locally and cached via GHA
+      - name: Build Local Image
         uses: docker/build-push-action@v6
         with:
           context: .
           load: true
           tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -152,44 +156,28 @@ jobs:
           restore-keys: |
             trivy-image-db-${{ runner.os }}-
 
-      - name: Generate Trivy Image Report (SARIF)
-        run: |
-          trivy image ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.DOCKERHUB_REPO }}:${{ steps.meta.outputs.version }} \
-            --cache-dir ${{ env.TRIVY_CACHE_DIR }} \
-            --format sarif \
-            --output trivy-image-report.sarif
-
-      - name: Publish Trivy Image Report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-image-sarif
-          path: trivy-image-report.sarif
-          retention-days: 14
-
+      # Quality Gate: Validates container image prior to release
       - name: Quality Gate - Container Image Vulnerabilities
         continue-on-error: true
         run: |
           trivy image ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.DOCKERHUB_REPO }}:${{ steps.meta.outputs.version }} \
             --cache-dir ${{ env.TRIVY_CACHE_DIR }} \
             --format table \
-            # --exit-code 1 \
+            --exit-code 1 \
             --ignore-unfixed \
             --severity HIGH,CRITICAL
 
       - name: Log in to Docker Hub
-        # if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Push Validated Image to Docker Hub
+      # Push validated images directly to registry
+      - name: Push Validated Images
         # if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
+        run: |
+          for tag in ${{ steps.meta.outputs.tags }}; do
+            docker push "$tag"
+          done
