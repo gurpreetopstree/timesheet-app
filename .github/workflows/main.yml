@@ -67,7 +67,7 @@ jobs:
 
       # Install Trivy CLI directly to bypass composite action sub-dependency bugs
       - name: Set up Trivy
-        uses: aquasecurity/setup-trivy@v0.2.2
+        uses: aquasecurity/setup-trivy@v0.3.1
         with:
           cache: true
 
@@ -138,7 +138,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Set up Trivy
-        uses: aquasecurity/setup-trivy@v0.2.2
+        uses: aquasecurity/setup-trivy@v0.3.1
         with:
           cache: true
 
