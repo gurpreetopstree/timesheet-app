@@ -12,10 +12,10 @@ on:
       - develop
 
 env:
-  DOCKERHUB_REPO: flask-app
+  DOCKERHUB_REPO: timesheet-python
   DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
   PYTHON_VERSION: "3.12"
-  SONAR_PROJECT_KEY: flask-app
+  SONAR_PROJECT_KEY: python-timesheet
   TRIVY_CACHE_DIR: .trivy-cache
 
 jobs:
