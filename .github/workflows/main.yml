@@ -2,10 +2,10 @@ name: Flask CI/CD
 
 on:
   workflow_dispatch:
-  # push:
-  #   branches:
-  #     - main
-  #     - develop
+  push:
+    branches:
+      - main
+      - develop
   pull_request:
     branches:
       - main
@@ -29,43 +29,43 @@ env:
 
 jobs:
   # --------------------------------------------------
-  # 1. Secret Scanning, Linters & Unit Tests (SAST)
+  # 1. Secret Scanning, SAST & Unit Tests
   # --------------------------------------------------
   code-quality-and-security:
-    name: Secrets, Lint & Unit Tests
+    name: Secrets, SAST & Unit Tests
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Required for Gitleaks and SonarQube history analysis
+          fetch-depth: 0 # Required for Gitleaks & Sonar history
 
-      # 1. Secret Scanning with Gitleaks
+      # 1. Secret Detection
       - name: Run Gitleaks Secret Detection
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 3. Python Setup with Pip Cache
+      # 2. Python Environment with Pip Cache
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      - name: Install dependencies & Linters
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest pytest-cov
 
-      # 5. Unit Tests with Coverage
+      # 3. Unit Tests & Coverage Report
       - name: Run unit tests with coverage
         run: |
           pytest --cov=. --cov-report=xml:coverage.xml
 
-      # 6. SonarQube Static Analysis
+      # 4. SonarQube Static Analysis
       - name: SonarQube Code Analysis
         uses: SonarSource/sonarqube-scan-action@v4
         env:
@@ -84,7 +84,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
-      # 7. Trivy Dependency / Filesystem Scan
+      # 5. Trivy Filesystem / Dependencies Scan
       - name: Set up Trivy
         uses: aquasecurity/setup-trivy@v0.3.1
         with:
@@ -132,7 +132,7 @@ jobs:
             type=sha,format=short,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
 
-      # Single Build: Loaded locally and cached via GHA
+      # Single Build: Load image to local Docker daemon with GHA cache
       - name: Build Local Image
         uses: docker/build-push-action@v6
         with:
@@ -156,7 +156,7 @@ jobs:
           restore-keys: |
             trivy-image-db-${{ runner.os }}-
 
-      # Quality Gate: Validates container image prior to release
+      # Quality Gate: Validates container image
       - name: Quality Gate - Container Image Vulnerabilities
         continue-on-error: true
         run: |
@@ -174,10 +174,12 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Push validated images directly to registry
+      # Pushes validated tags safely without bash syntax errors
       - name: Push Validated Images
         # if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          for tag in ${{ steps.meta.outputs.tags }}; do
+          for tag in $TAGS; do
             docker push "$tag"
           done
